@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+
+# Device fingerprint & credentials (SENSITIVE)
+bili_config/config.json
+bili_config/device.json
+
+# macOS
+.DS_Store
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
