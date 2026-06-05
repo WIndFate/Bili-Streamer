@@ -79,6 +79,17 @@ def random_delay(min_seconds=0.5, max_seconds=2.5):
     delay = random.uniform(min_seconds, max_seconds)
     time.sleep(delay)
 
+
+def is_success_response(response: dict) -> bool:
+    return isinstance(response, dict) and response.get("code") == 0
+
+
+def response_message(response: dict, default: str = "未知错误") -> str:
+    if not isinstance(response, dict):
+        return default
+    return response.get("message") or response.get("msg") or default
+
+
 # 生成随机设备标识
 class DeviceFingerprint:
     """生成和管理持久化的设备指纹"""
@@ -635,6 +646,27 @@ def start_live(cookie: str, area_id: int, title: str = "") -> dict:
     if not room_id:
         return {"code": -1, "message": "无法获取直播间ID"}
 
+    title = title.strip()
+    pre_live_title_response = None
+    if title:
+        # 先同步预开播信息，避免 startLive 使用旧标题创建本场直播。
+        pre_live_title_response = update_pre_live_title(cookie, title)
+        if not is_success_response(pre_live_title_response):
+            room_title_response = update_room_title(cookie, title)
+            if not is_success_response(room_title_response):
+                return {
+                    "code": -1,
+                    "message": (
+                        "标题同步失败，已取消开播: "
+                        f"{response_message(pre_live_title_response)}; "
+                        f"{response_message(room_title_response)}"
+                    ),
+                    "title_update": {
+                        "pre_live": pre_live_title_response,
+                        "room_update": room_title_response,
+                    },
+                }
+
     # 构建请求参数
     params = {
         "area_v2": area_id,
@@ -642,7 +674,7 @@ def start_live(cookie: str, area_id: int, title: str = "") -> dict:
         "csrf": csrf,
         "csrf_token": csrf,
         "build": device_fp.fingerprint["build_number"],
-        "platform": "android",
+        "platform": "android_link",
         "mobi_app": "android",
         "ts": int(time.time())
     }
@@ -655,10 +687,16 @@ def start_live(cookie: str, area_id: int, title: str = "") -> dict:
     try:
         response = get_http_session().post(api, headers=headers, data=signed_params).json()
 
-        # 更新标题（如果成功）
-        if title and response["code"] == 0:
+        if title:
+            response["title_update"] = {"pre_live": pre_live_title_response}
+
+        # 开播成功后再补一次直播间标题更新，并把结果返回给调用方。
+        if title and is_success_response(response):
             random_delay(0.8, 1.5)
-            update_room_title(cookie, title)
+            room_title_response = update_room_title(cookie, title)
+            response["title_update"]["room_update"] = room_title_response
+            if not is_success_response(room_title_response):
+                response["title_warning"] = response_message(room_title_response)
 
         return response
     except Exception as e:
@@ -690,7 +728,7 @@ def stop_live(cookie: str) -> dict:
         "csrf": csrf,
         "csrf_token": csrf,
         "build": device_fp.fingerprint["build_number"],
-        "platform": "android",
+        "platform": "android_link",
         "mobi_app": "android",
         "ts": int(time.time())
     }
@@ -707,7 +745,7 @@ def stop_live(cookie: str) -> dict:
 
 def update_room_title(cookie: str, title: str) -> dict:
     """
-    更新直播间标题（模拟 Android 直播姬）
+    更新直播间标题
     @param cookie: 登录cookie
     @param title: 新标题
     @return: 结果
@@ -718,6 +756,8 @@ def update_room_title(cookie: str, title: str) -> dict:
 
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
+    if not csrf:
+        return {"code": -1, "message": "缺少 bili_jct，无法更新直播标题"}
 
     room_id = get_room_id(cookie)
     if not room_id:
@@ -731,19 +771,52 @@ def update_room_title(cookie: str, title: str) -> dict:
         "title": title,
         "csrf": csrf,
         "csrf_token": csrf,
-        "build": device_fp.fingerprint["build_number"],
-        "platform": "android",
-        "mobi_app": "android",
-        "ts": int(time.time())
+        "platform": "web",
+        "visit_id": "",
     }
 
-    signed_params = sign_params(params)
-
     try:
-        response = get_http_session().post(api, headers=headers, data=signed_params).json()
+        response = get_http_session().post(api, headers=headers, data=params).json()
         return response
     except Exception as e:
         print(f"更新标题请求出错: {str(e)}")
+        return {"code": -1, "message": str(e)}
+
+
+def update_pre_live_title(cookie: str, title: str) -> dict:
+    """
+    更新预开播标题，让 startLive 使用最新标题创建直播场次
+    @param cookie: 登录cookie
+    @param title: 新标题
+    @return: 结果
+    """
+
+    device_fp = get_device_fp()
+    headers = device_fp.get_headers(with_cookie=cookie)
+
+    cookies = cookie2dict(cookie)
+    csrf = cookies.get("bili_jct")
+    if not csrf:
+        return {"code": -1, "message": "缺少 bili_jct，无法同步预开播标题"}
+
+    random_delay(0.5, 1.5)
+
+    api = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/UpdatePreLiveInfo"
+    params = {
+        "title": title,
+        "csrf": csrf,
+        "csrf_token": csrf,
+        "platform": "web",
+        "mobi_app": "web",
+        "build": "1",
+        "visit_id": "",
+    }
+
+    try:
+        response = get_http_session().post(api, headers=headers, data=params).json()
+        return response
+    except Exception as e:
+        print(f"同步预开播标题出错: {str(e)}")
         return {"code": -1, "message": str(e)}
 
 
@@ -904,10 +977,11 @@ def update_live_area(cookie: str, area_id: int) -> dict:
     # 创建设备指纹
     device_fp = get_device_fp()
     headers = device_fp.get_headers(with_cookie=cookie)
-    common_params = device_fp.get_common_params()
     
     cookies = cookie2dict(cookie)
-    csrf = cookies["bili_jct"]
+    csrf = cookies.get("bili_jct")
+    if not csrf:
+        return {"code": -1, "message": "缺少 bili_jct，无法更新直播分区"}
     
     room_id = get_room_id(cookie)
     if not room_id:
@@ -919,19 +993,14 @@ def update_live_area(cookie: str, area_id: int) -> dict:
     params = {
         "room_id": room_id,
         "area_id": area_id,
-        "csrf_token": csrf,
         "csrf": csrf,
-        "build": device_fp.fingerprint["build_number"],
-        "platform": "android",
-        "mobi_app": "android",
-        "ts": int(time.time())
+        "csrf_token": csrf,
+        "platform": "web",
+        "visit_id": "",
     }
     
-    # 添加签名
-    signed_params = sign_params(params)  # 添加这行
-    
     try:
-        response = get_http_session().post(api, headers=headers, data=signed_params).json()  # 修改这行
+        response = get_http_session().post(api, headers=headers, data=params).json()
         return response
     except Exception as e:
         print(f"更新分区请求出错: {str(e)}")
@@ -1069,6 +1138,10 @@ def get_stream_key(cookie_str, force_restart=False, custom_title=""):
             
             if start_result['code'] == 0:
                 print("开播成功！")
+                if start_result.get("title_warning"):
+                    print(f"标题同步可能未生效: {start_result['title_warning']}")
+                elif start_result.get("title_update"):
+                    print("直播标题已同步")
                 
             else:
                 print(f"开播失败: {start_result.get('message', '未知错误')}")

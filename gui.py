@@ -498,6 +498,10 @@ class MainWindow(QMainWindow):
         self._set_buttons_enabled(True)
         if result and result.get("code") == 0:
             self.log("开播成功！")
+            if result.get("title_warning"):
+                self.log(f"标题同步可能未生效: {result['title_warning']}")
+            elif result.get("title_update"):
+                self.log("直播标题已同步")
             self._refresh_status()
         else:
             self.log(f"开播失败: {result.get('message', '未知错误') if result else '无响应'}")
