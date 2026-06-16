@@ -1,6 +1,6 @@
 # Bili-Streamer
 
-A cross-platform tool for managing Bilibili live streams. Simulates the official Android streaming client to start/stop broadcasts, change stream categories, and update titles — with both a GUI and CLI interface.
+A cross-platform tool for managing Bilibili live streams. Uses Bilibili LiveHime-compatible PC APIs to start/stop broadcasts, change stream categories, and update titles — with both a GUI and CLI interface.
 
 **[中文文档](docs/README_zh.md) | [日本語ドキュメント](docs/README_ja.md)**
 
@@ -12,7 +12,7 @@ A cross-platform tool for managing Bilibili live streams. Simulates the official
 - **Start / Stop Live** — One-click broadcast control
 - **Category Selection** — Tree-view picker for stream categories with history
 - **Title Management** — Auto-remembers your last used title
-- **Device Fingerprint** — Persistent, realistic device identity to reduce risk
+- **LiveHime PC API** — Uses the current PC-compatible live control flow
 - **Dual Interface** — PyQt6 GUI or command-line
 
 ## Screenshots

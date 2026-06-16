@@ -1,5 +1,4 @@
 import argparse
-import base64
 import io
 import json
 import os
@@ -8,30 +7,28 @@ import requests
 import sys
 import time
 import random
-import string
 import hashlib
-import uuid
-import platform
-import re
 from pathlib import Path
 from urllib.parse import urlencode, quote
-from datetime import datetime, timedelta
 
 
-APP_KEY = "1d8b6e7d45233436"
-APP_SECRET = "560c52ccd288fed045859ed18bffd973"
+LIVEHIME_APP_KEY = "aae92bc66f3edfab"
+LIVEHIME_APP_SECRET = "af125a0d5279fd576c1b4418a3e8276d"
+LIVEHIME_DEFAULT_VERSION = "7.43.1.10171"
+LIVEHIME_DEFAULT_BUILD = 10171
+LIVE_API_ORIGIN = "https://api.live.bilibili.com"
+LIVE_WEB_REFERER = "https://live.bilibili.com/"
+LIVEHIME_REFERER = "https://link.bilibili.com/p/center/index"
+LIVEHIME_ORIGIN = "https://link.bilibili.com"
+LIVEHIME_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/129.0.0.0 Safari/537.36"
+)
 
 # Global instances (lazy-initialized in main)
-_device_fp = None
 _http_session = None
-
-
-def get_device_fp():
-    """Get or create the global DeviceFingerprint singleton"""
-    global _device_fp
-    if _device_fp is None:
-        _device_fp = DeviceFingerprint()
-    return _device_fp
+_livehime_version = None
 
 
 def get_http_session():
@@ -50,21 +47,23 @@ def _wrap_timeout(original_request):
         return original_request(*args, **kwargs)
     return wrapper
 
-def sign_params(params: dict) -> dict:
+def sign_params(params: dict, app_key: str, app_secret: str) -> dict:
     """
-    为 B站 APP 接口参数生成 sign 字段（签名）
+    为 B 站 appkey 接口参数生成 sign 字段。
     @param params: 要发送的请求参数字典
     @return: 添加 sign 的完整参数字典
     """
+    params = {key: str(value) for key, value in params.items() if value is not None}
+
     # 添加 appkey
-    params["appkey"] = APP_KEY
+    params["appkey"] = app_key
 
     # 对参数按 key 升序排序
     sorted_items = sorted(params.items())
     query_str = urlencode(sorted_items)
 
     # 拼接 app_secret
-    sign_str = f"{query_str}{APP_SECRET}"
+    sign_str = f"{query_str}{app_secret}"
 
     # 计算 md5
     sign = hashlib.md5(sign_str.encode("utf-8")).hexdigest()
@@ -72,6 +71,108 @@ def sign_params(params: dict) -> dict:
     # 加入 sign 参数
     params["sign"] = sign
     return params
+
+
+def sign_livehime_params(params: dict) -> dict:
+    """为直播姬接口生成 appkey/sign。"""
+    return sign_params(params, LIVEHIME_APP_KEY, LIVEHIME_APP_SECRET)
+
+
+def get_livehime_headers(
+    cookie: str = None,
+    origin: str = LIVEHIME_ORIGIN,
+    referer: str = LIVEHIME_REFERER,
+) -> dict:
+    """获取直播姬 PC 入口请求头。"""
+    headers = {
+        "User-Agent": LIVEHIME_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": origin,
+        "Referer": referer,
+        "Connection": "Keep-Alive",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def get_web_headers(cookie: str = None, referer: str = "https://www.bilibili.com/") -> dict:
+    """获取普通 Web 请求头，不再模拟 Android 客户端。"""
+    headers = {
+        "User-Agent": LIVEHIME_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": referer,
+        "Connection": "Keep-Alive",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def get_bilibili_server_timestamp() -> int:
+    """获取 B 站服务端秒级时间戳，失败时退回本机时间。"""
+    api = "https://api.bilibili.com/x/report/click/now"
+    headers = {
+        "User-Agent": LIVEHIME_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": LIVE_WEB_REFERER,
+    }
+    try:
+        response = get_http_session().get(api, headers=headers).json()
+        if response.get("code") == 0 and isinstance(response.get("data"), dict):
+            now = response["data"].get("now")
+            if now:
+                now = int(now)
+                return now // 1000 if now > 10_000_000_000 else now
+    except Exception:
+        pass
+    return int(time.time())
+
+
+def get_livehime_version(ts: int = None) -> dict:
+    """
+    获取直播姬当前版本。
+    失败时返回一个社区常用的保底版本，避免版本接口短暂异常直接阻断开播。
+    """
+    global _livehime_version
+    if _livehime_version:
+        return _livehime_version
+
+    fallback = {
+        "version": LIVEHIME_DEFAULT_VERSION,
+        "build": LIVEHIME_DEFAULT_BUILD,
+        "warning": None,
+    }
+
+    api = "https://api.live.bilibili.com/xlive/app-blink/v1/liveVersionInfo/getHomePageLiveVersion"
+    params = sign_livehime_params({
+        "system_version": 2,
+        "ts": ts or get_bilibili_server_timestamp(),
+    })
+
+    try:
+        response = get_http_session().get(api, headers=get_livehime_headers(), params=params).json()
+        if response.get("code") == 0 and isinstance(response.get("data"), dict):
+            data = response["data"]
+            version = data.get("curr_version") or data.get("version")
+            build = data.get("build")
+            if version and build:
+                _livehime_version = {
+                    "version": str(version),
+                    "build": int(build),
+                    "warning": None,
+                }
+                return _livehime_version
+
+        fallback["warning"] = f"获取直播姬版本失败: {response_message(response)}"
+    except Exception as e:
+        fallback["warning"] = f"获取直播姬版本失败: {str(e)}"
+
+    return fallback
 
 # 添加随机延迟函数
 def random_delay(min_seconds=0.5, max_seconds=2.5):
@@ -90,204 +191,39 @@ def response_message(response: dict, default: str = "未知错误") -> str:
     return response.get("message") or response.get("msg") or default
 
 
-# 生成随机设备标识
-class DeviceFingerprint:
-    """生成和管理持久化的设备指纹"""
-    
-    def __init__(self, dirname="bili_config"):
-        self.config_dir = Path(dirname)
-        self.fingerprint_path = self.config_dir / "device.json"
-        if not os.path.exists(dirname):
-            os.makedirs(dirname, exist_ok=True)
-        self.fingerprint = self._load_or_create()
-    
-    def _generate_fingerprint(self):
-        """生成一套一致的设备指纹"""
-        # 生成持久化的设备ID
-        device_id = str(uuid.uuid4())
+def is_api_sign_error(response: dict) -> bool:
+    """判断是否为 appkey/sign 校验类错误，可安全切换备用请求形态。"""
+    if not isinstance(response, dict):
+        return False
+    if response.get("code") == -3:
+        return True
+    message = response_message(response, "")
+    return any(keyword in message for keyword in ("API校验密匙错误", "API校验签名错误"))
 
-        # Popular Android flagship models (2024-2025)
-        android_models = [
-            "Xiaomi 14 Ultra", "Xiaomi 15",
-            "Samsung Galaxy S24", "Samsung Galaxy S24 Ultra", "Samsung Galaxy S25",
-            "OnePlus 12", "OnePlus 13",
-            "Google Pixel 9 Pro",
-        ]
-        device_model = random.choice(android_models)
 
-        android_versions = ["14", "15"]
-        android_version = random.choice(android_versions)
+def is_retryable_start_stop_error(response: dict) -> bool:
+    """PC 请求形态不兼容时常见的泛化错误，允许尝试下一种形态。"""
+    if not isinstance(response, dict):
+        return False
+    if is_api_sign_error(response):
+        return True
+    message = response_message(response, "")
+    if message in {"请求错误", "参数错误"}:
+        return True
+    return any(keyword in message for keyword in (
+        "请使用哔哩哔哩App",
+        "请使用哔哩哔哩APP",
+    ))
 
-        # Matching screen resolutions for each model
-        screen_resolutions = {
-            "Xiaomi 14 Ultra": "1440x3200",
-            "Xiaomi 15": "1440x3200",
-            "Samsung Galaxy S24": "1080x2340",
-            "Samsung Galaxy S24 Ultra": "1440x3120",
-            "Samsung Galaxy S25": "1080x2340",
-            "OnePlus 12": "1440x3168",
-            "OnePlus 13": "1440x3168",
-            "Google Pixel 9 Pro": "1280x2856",
-        }
-        screen_resolution = screen_resolutions[device_model]
 
-        # Matching screen densities (dpi)
-        screen_densities = {
-            "Xiaomi 14 Ultra": "522",
-            "Xiaomi 15": "522",
-            "Samsung Galaxy S24": "425",
-            "Samsung Galaxy S24 Ultra": "505",
-            "Samsung Galaxy S25": "425",
-            "OnePlus 12": "510",
-            "OnePlus 13": "510",
-            "Google Pixel 9 Pro": "486",
-        }
-        screen_density = screen_densities[device_model]
+def summarize_attempts(attempts: list) -> str:
+    parts = []
+    for attempt in attempts:
+        name = attempt.get("name", "unknown")
+        response = attempt.get("response", {})
+        parts.append(f"{name}: {response_message(response)}")
+    return "; ".join(parts)
 
-        # Recent BiliDroid versions
-        app_versions = ["7.82.0", "7.81.0", "7.80.0"]
-        app_version = random.choice(app_versions)
-        
-        # Generate BUVID in real format: XX + 32-char lowercase MD5 hex
-        buvid = "XX" + hashlib.md5(str(uuid.uuid4()).encode()).hexdigest()
-        
-        # 构建指纹字典
-        return {
-            # 基本标识符
-            "device_id": device_id,
-            "buvid": buvid,
-            
-            # 设备信息
-            "model": device_model,
-            "brand": device_model.split(" ")[0],  # 提取品牌名称(Xiaomi/OnePlus等)
-            "manufacturer": device_model.split(" ")[0],
-            
-            # 系统信息
-            "android_version": android_version,
-            "build_id": f"T{random.choice('ABCDEFGHIJKLMN')}{random.randint(1,9)}{random.randint(0,9)}A.{random.randint(100,999)}{random.choice('ABCDEF')}",  # 如 TKQ1A.230829D
-            
-            # 显示信息
-            "screen_resolution": screen_resolution,
-            "screen_density": screen_density,
-            "display": f"{screen_resolution}, {screen_density}dpi",
-            
-            # 应用信息
-            "app_version": app_version,
-            "build_number": app_version.replace(".", "") + "00",
-            "channel": "bili",
-            
-            # 设备硬件信息
-            "cpu_abi": "arm64-v8a",  # 现代设备都使用64位CPU
-            "memory": f"{random.choice([6, 8, 12, 16])}GB",  # 内存大小
-            
-            # 地区和语言
-            "timezone": "GMT+08:00",  # 中国时区
-            "language": "zh-CN",
-            "region": "CN",
-            
-            # Network info
-            "network_type": random.choice(["WIFI", "5G", "4G"]),
-
-            # Timestamps and fingerprints (generated once, persisted)
-            "created_at": time.time(),
-            "fp_local": hashlib.md5((device_id + buvid).encode()).hexdigest() + str(int(time.time()))[:8],
-            "fp_remote": hashlib.md5((device_id + buvid + "bilibili").encode()).hexdigest() + str(int(time.time()))[:8],
-
-            # Bilibili-specific fingerprint params (stable per device)
-            "session_id": ''.join(random.choices(string.ascii_lowercase + string.digits, k=8)),
-            "guest_id": ''.join(random.choices(string.digits, k=15)),
-            "display_id": f"{random.randint(10000000, 99999999)}-{int(time.time())}",
-        }
-    
-    def _load_or_create(self):
-        """加载现有指纹或创建新指纹"""
-        try:
-            if os.path.exists(self.fingerprint_path):
-                with open(self.fingerprint_path, 'r', encoding='utf-8') as f:
-                    fingerprint = json.load(f)
-                    # 检查指纹是否完整
-                    required_keys = ["device_id", "buvid", "model", "android_version",
-                                    "app_version", "build_number", "fp_local", "fp_remote"]
-                    if all(key in fingerprint for key in required_keys):
-                        # Backfill fields added in newer versions
-                        updated = False
-                        if "display_id" not in fingerprint:
-                            fingerprint["display_id"] = f"{random.randint(10000000, 99999999)}-{int(time.time())}"
-                            updated = True
-                        if "session_id" not in fingerprint:
-                            fingerprint["session_id"] = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-                            updated = True
-                        if updated:
-                            self._save_fingerprint(fingerprint)
-                        return fingerprint
-        except Exception as e:
-            print(f"读取设备指纹出错，将创建新指纹: {str(e)}")
-        
-        # 创建新指纹
-        fingerprint = self._generate_fingerprint()
-        self._save_fingerprint(fingerprint)
-        return fingerprint
-    
-    def _save_fingerprint(self, fingerprint):
-        """保存指纹到文件"""
-        try:
-            with open(self.fingerprint_path, 'w', encoding='utf-8') as f:
-                json.dump(fingerprint, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"保存设备指纹出错: {str(e)}")
-    
-    def get_headers(self, with_cookie=None):
-        """Generate request headers based on persisted device fingerprint"""
-        # Map network_type to numeric code used in UA (stable per session)
-        network_map = {"WIFI": 2, "4G": 1, "5G": 3}
-        network_code = network_map.get(self.fingerprint.get("network_type", "WIFI"), 2)
-
-        headers = {
-            "User-Agent": f"Mozilla/5.0 BiliDroid/{self.fingerprint['app_version']} "
-                        f"os/android model/{self.fingerprint['model']} mobi_app/android "
-                        f"build/{self.fingerprint['build_number']} channel/{self.fingerprint.get('channel', 'bili')} "
-                        f"innerVer/{self.fingerprint['build_number']} osVer/{self.fingerprint['android_version']} "
-                        f"network/{network_code}",
-            "Buvid": self.fingerprint["buvid"],
-            "Device-ID": self.fingerprint["device_id"],
-            "Display-ID": self.fingerprint.get("display_id", f"{random.randint(10000000, 99999999)}-{int(time.time())}"),
-            "App-Key": "android64",
-            "x-from-bilibili": "true",
-            "env": "prod",
-            "Accept-Encoding": "gzip",
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Connection": "Keep-Alive",
-            "Screen-Density": f"{self.fingerprint.get('screen_density', '480')}dpi",
-            "Device-Brand": self.fingerprint.get('brand', self.fingerprint['model'].split(" ")[0]),
-            "Device-Model": self.fingerprint['model'],
-            "os": "android",
-            "os_ver": self.fingerprint['android_version'],
-            "fp_local": self.fingerprint["fp_local"],
-            "fp_remote": self.fingerprint["fp_remote"],
-            "Session-ID": self.fingerprint["session_id"],
-        }
-        
-        if with_cookie:
-            headers["cookie"] = with_cookie
-        
-        return headers
-    
-    def get_common_params(self):
-        """获取通用请求参数"""
-        return {
-            "platform": "android",
-            "build": self.fingerprint["build_number"],
-            "mobi_app": "android",
-            "device": "android",
-            "channel": "bili",
-            "statistics": json.dumps({
-                "appId": 1,
-                "platform": 3,
-                "version": self.fingerprint["app_version"],
-                "abtest": ""
-            })
-        }
 
 # 原有工具类函数
 class ConfigManager:
@@ -502,9 +438,7 @@ def generate_qrcode() -> dict:
     申请登录二维码
     @return: {'url': 二维码文本, 'qrcode_key': 扫描秘钥}
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers()
+    headers = get_web_headers()
     
     api = 'https://passport.bilibili.com/x/passport-login/web/qrcode/generate'
     response = get_http_session().get(api, headers=headers).json()
@@ -521,9 +455,7 @@ def check_login_status(qrcode_key: str) -> dict:
     @return: {'code': 状态码, 'cookies': cookies字典}
     状态码: 0-成功，86038-二维码已失效，86090-已扫码未确认，86101-未扫码
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers()
+    headers = get_web_headers()
     
     api = f'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}'
     
@@ -570,9 +502,7 @@ def get_room_info(uid: int) -> dict:
     @param uid: B站UID
     @return: 直播间信息
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers()
+    headers = get_livehime_headers(origin=LIVE_API_ORIGIN, referer=LIVE_WEB_REFERER)
     
     # 添加随机延迟
     random_delay(0.3, 1.0)
@@ -580,8 +510,6 @@ def get_room_info(uid: int) -> dict:
     api = "https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld"
     params = {
         "mid": uid,
-        **device_fp.get_common_params(),
-        "ts": int(time.time())
     }
     response = get_http_session().get(api, headers=headers, params=params).json()
     return response["data"]
@@ -593,30 +521,24 @@ def get_room_id(cookie: str) -> int:
     @param cookie: 登录cookie
     @return: 直播间号
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
-    common_params = device_fp.get_common_params()
-    
-    # 添加随机延迟
-    random_delay(0.5, 1.5)
-    
-    # 尝试使用直播姬特有的API获取房间ID
-    api = "https://api.live.bilibili.com/xlive/app-blink/v1/highlight/getRoomHighlightState"
-    params = {
-        **common_params,
-        "ts": int(time.time())
-    }
-    
+    # 优先使用直播姬 PC 入口接口，与开播请求保持一致
     try:
-        response = get_http_session().get(api, headers=headers, params=params).json()
-        if response["code"] == 0 and "data" in response and "room_id" in response["data"]:
-            return response["data"]["room_id"]
+        api = "https://api.live.bilibili.com/xlive/app-blink/v1/room/GetInfo"
+        params = {"platform": "pc_link"}
+        response = get_http_session().get(
+            api,
+            headers=get_livehime_headers(cookie),
+            params=params,
+        ).json()
+        if response.get("code") == 0 and isinstance(response.get("data"), dict):
+            room_id = response["data"].get("room_id") or response["data"].get("roomid")
+            if room_id:
+                return int(room_id)
         else:
-            print(f"尝试获取直播间ID: {response.get('message', '未知错误')}")
+            print(f"直播姬接口获取直播间ID: {response_message(response)}")
     except Exception as e:
-        print(f"尝试获取直播间ID出错: {str(e)}")
-    
+        print(f"直播姬接口获取直播间ID出错: {str(e)}")
+
     # 备用方法: 从通用API获取房间ID
     try:
         cookies = cookie2dict(cookie)
@@ -631,15 +553,47 @@ def get_room_id(cookie: str) -> int:
     return 0
 
 
-def start_live(cookie: str, area_id: int, title: str = "") -> dict:
+def enrich_start_live_response(response: dict, cookie: str) -> dict:
+    """补充开播失败时 UI/CLI 需要展示的认证信息。"""
+    if not isinstance(response, dict):
+        return {"code": -1, "message": "开播失败: 响应格式异常"}
 
-    # 创建设备指纹（假设你的 DeviceFingerprint 仍然工作）
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
+    code = response.get("code")
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+
+    if code == 60024:
+        qr_url = data.get("qr")
+        if qr_url:
+            response["face_auth_url"] = qr_url
+        response["message"] = (
+            f"{response_message(response, '目标分区需要人脸认证')}，"
+            "请使用哔哩哔哩 App 完成认证后重试"
+        )
+    elif code == 60043:
+        try:
+            uid = cookie2dict(cookie).get("DedeUserID")
+        except Exception:
+            uid = None
+        if uid:
+            response["face_auth_url"] = (
+                "https://www.bilibili.com/blackboard/live/face-auth-middle.html"
+                f"?source_event=400&mid={uid}"
+            )
+        response["message"] = (
+            f"{response_message(response, '本次开播需要身份验证')}，"
+            "请使用哔哩哔哩 App 完成认证后重试"
+        )
+
+    return response
+
+
+def start_live(cookie: str, area_id: int, title: str = "") -> dict:
 
     # 提取 csrf
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
+    if not csrf:
+        return {"code": -1, "message": "缺少 bili_jct，无法开播"}
 
     # 获取 room_id
     room_id = get_room_id(cookie)
@@ -667,25 +621,78 @@ def start_live(cookie: str, area_id: int, title: str = "") -> dict:
                     },
                 }
 
-    # 构建请求参数
-    params = {
+    # 构建请求参数。当前社区实现以 pc_link + 直播姬 appkey/sign 为主。
+    server_ts = get_bilibili_server_timestamp()
+    livehime_version = get_livehime_version(server_ts)
+    pc_params = {
         "area_v2": area_id,
         "room_id": room_id,
         "csrf": csrf,
         "csrf_token": csrf,
-        "build": device_fp.fingerprint["build_number"],
-        "platform": "android_link",
-        "mobi_app": "android",
-        "ts": int(time.time())
+        "platform": "pc_link",
+        "backup_stream": 0,
+        "version": livehime_version["version"],
+        "build": livehime_version["build"],
+        "ts": server_ts,
     }
+    pc_params_ms = {**pc_params, "ts": server_ts * 1000}
 
-    # 添加签名
-    signed_params = sign_params(params)
+    attempts = [
+        {
+            "name": "PC直播姬签名(body)",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "data": sign_livehime_params(pc_params),
+        },
+        {
+            "name": "PC直播姬签名(query)",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "params": sign_livehime_params(pc_params),
+        },
+        {
+            "name": "PC直播姬签名(body/ms)",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "data": sign_livehime_params(pc_params_ms),
+        },
+        {
+            "name": "PC无签名",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "data": {key: str(value) for key, value in pc_params.items() if value is not None},
+        },
+    ]
 
     # 发送 POST 请求
     api = "https://api.live.bilibili.com/room/v1/Room/startLive"
+    attempt_results = []
     try:
-        response = get_http_session().post(api, headers=headers, data=signed_params).json()
+        response = None
+        for index, attempt in enumerate(attempts):
+            response = get_http_session().post(
+                api,
+                headers=attempt["headers"],
+                params=attempt.get("params"),
+                data=attempt.get("data"),
+            ).json()
+            attempt_results.append({"name": attempt["name"], "response": response})
+            if is_success_response(response) or not is_retryable_start_stop_error(response) or index == len(attempts) - 1:
+                break
+
+        if not is_success_response(response) and is_retryable_start_stop_error(response):
+            response["message"] = f"开播接口请求形态均失败: {summarize_attempts(attempt_results)}"
+
+        if attempt_results:
+            response["start_live_attempts"] = [
+                {
+                    "name": attempt["name"],
+                    "code": attempt["response"].get("code"),
+                    "message": response_message(attempt["response"]),
+                }
+                for attempt in attempt_results
+                if isinstance(attempt.get("response"), dict)
+            ]
+            response["start_live_method"] = attempt_results[-1]["name"]
+
+        if livehime_version.get("warning"):
+            response["livehime_version_warning"] = livehime_version["warning"]
 
         if title:
             response["title_update"] = {"pre_live": pre_live_title_response}
@@ -698,23 +705,22 @@ def start_live(cookie: str, area_id: int, title: str = "") -> dict:
             if not is_success_response(room_title_response):
                 response["title_warning"] = response_message(room_title_response)
 
-        return response
+        return enrich_start_live_response(response, cookie)
     except Exception as e:
         return {"code": -1, "message": f"开播失败: {str(e)}"}
 
 
 def stop_live(cookie: str) -> dict:
     """
-    结束直播（模拟 Android 直播姬）
+    结束直播
     @param cookie: 登录cookie
     @return: 结果
     """
 
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
-
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
+    if not csrf:
+        return {"code": -1, "message": "缺少 bili_jct，无法停播"}
 
     room_id = get_room_id(cookie)
     if not room_id:
@@ -723,20 +729,65 @@ def stop_live(cookie: str) -> dict:
     random_delay(0.8, 2.0)
 
     api = "https://api.live.bilibili.com/room/v1/Room/stopLive"
-    params = {
+    server_ts = get_bilibili_server_timestamp()
+    livehime_version = get_livehime_version(server_ts)
+    pc_params = {
         "room_id": room_id,
         "csrf": csrf,
         "csrf_token": csrf,
-        "build": device_fp.fingerprint["build_number"],
-        "platform": "android_link",
-        "mobi_app": "android",
-        "ts": int(time.time())
+        "platform": "pc_link",
+        "version": livehime_version["version"],
+        "build": livehime_version["build"],
+        "ts": server_ts,
     }
 
-    signed_params = sign_params(params)
+    attempts = [
+        {
+            "name": "PC直播姬签名(body)",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "data": sign_livehime_params(pc_params),
+        },
+        {
+            "name": "PC直播姬签名(query)",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "params": sign_livehime_params(pc_params),
+        },
+        {
+            "name": "PC无签名",
+            "headers": get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER),
+            "data": {key: str(value) for key, value in pc_params.items() if value is not None},
+        },
+    ]
 
+    attempt_results = []
     try:
-        response = get_http_session().post(api, headers=headers, data=signed_params).json()
+        response = None
+        for index, attempt in enumerate(attempts):
+            response = get_http_session().post(
+                api,
+                headers=attempt["headers"],
+                params=attempt.get("params"),
+                data=attempt.get("data"),
+            ).json()
+            attempt_results.append({"name": attempt["name"], "response": response})
+            if is_success_response(response) or not is_retryable_start_stop_error(response) or index == len(attempts) - 1:
+                break
+
+        if not is_success_response(response) and is_retryable_start_stop_error(response):
+            response["message"] = f"停播接口请求形态均失败: {summarize_attempts(attempt_results)}"
+
+        if attempt_results:
+            response["stop_live_attempts"] = [
+                {
+                    "name": attempt["name"],
+                    "code": attempt["response"].get("code"),
+                    "message": response_message(attempt["response"]),
+                }
+                for attempt in attempt_results
+                if isinstance(attempt.get("response"), dict)
+            ]
+            response["stop_live_method"] = attempt_results[-1]["name"]
+
         return response
     except Exception as e:
         print(f"停播请求出错: {str(e)}")
@@ -751,8 +802,7 @@ def update_room_title(cookie: str, title: str) -> dict:
     @return: 结果
     """
 
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
+    headers = get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER)
 
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
@@ -791,8 +841,7 @@ def update_pre_live_title(cookie: str, title: str) -> dict:
     @return: 结果
     """
 
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
+    headers = get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER)
 
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
@@ -825,18 +874,14 @@ def get_area_list() -> list:
     获取直播分区列表
     @return: 分区列表
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers()
-    common_params = device_fp.get_common_params()
+    headers = get_livehime_headers(origin=LIVE_API_ORIGIN, referer=LIVE_WEB_REFERER)
     
     # 添加随机延迟
     random_delay(0.3, 1.0)
     
     api = "https://api.live.bilibili.com/room/v1/Area/getList"
     params = {
-        **common_params,
-        "ts": int(time.time())
+        "show_pinyin": 1,
     }
     
     try:
@@ -974,9 +1019,7 @@ def update_live_area(cookie: str, area_id: int) -> dict:
     @param area_id: 二级分区id
     @return: 结果
     """
-    # 创建设备指纹
-    device_fp = get_device_fp()
-    headers = device_fp.get_headers(with_cookie=cookie)
+    headers = get_livehime_headers(cookie, LIVE_API_ORIGIN, LIVE_WEB_REFERER)
     
     cookies = cookie2dict(cookie)
     csrf = cookies.get("bili_jct")
@@ -1034,9 +1077,7 @@ def get_stream_key(cookie_str, force_restart=False, custom_title=""):
         if live_status is None:
             # 尝试通过额外的API调用获取直播状态
             try:
-                # 创建设备指纹
-                device_fp = get_device_fp()
-                headers = device_fp.get_headers(with_cookie=cookie_str)
+                headers = get_livehime_headers(cookie_str, LIVE_API_ORIGIN, LIVE_WEB_REFERER)
                 
                 live_status_api = f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}"
                 status_response = get_http_session().get(live_status_api, headers=headers).json()
@@ -1138,6 +1179,8 @@ def get_stream_key(cookie_str, force_restart=False, custom_title=""):
             
             if start_result['code'] == 0:
                 print("开播成功！")
+                if start_result.get("livehime_version_warning"):
+                    print(start_result["livehime_version_warning"])
                 if start_result.get("title_warning"):
                     print(f"标题同步可能未生效: {start_result['title_warning']}")
                 elif start_result.get("title_update"):
@@ -1145,6 +1188,13 @@ def get_stream_key(cookie_str, force_restart=False, custom_title=""):
                 
             else:
                 print(f"开播失败: {start_result.get('message', '未知错误')}")
+                for attempt in start_result.get("start_live_attempts", []):
+                    print(
+                        f"  {attempt.get('name')}: "
+                        f"{attempt.get('message', '未知错误')} ({attempt.get('code')})"
+                    )
+                if start_result.get("face_auth_url"):
+                    print(f"认证地址: {start_result['face_auth_url']}")
                 return
     else:
         print("您没有直播间，请使用其他账号尝试")
@@ -1177,8 +1227,7 @@ def change_area_only(cookie_str):
     # 如果仍未找到直播状态，尝试通过其他API获取
     if live_status is None:
         try:
-            device_fp = get_device_fp()
-            headers = device_fp.get_headers(with_cookie=cookie_str)
+            headers = get_livehime_headers(cookie_str, LIVE_API_ORIGIN, LIVE_WEB_REFERER)
             
             live_status_api = f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}"
             status_response = get_http_session().get(live_status_api, headers=headers).json()
@@ -1265,7 +1314,7 @@ def quit_live_only(cookie_str):
 
 def main():
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description='B站直播推流码获取工具 - 模拟直播姬版')
+    parser = argparse.ArgumentParser(description='B站直播推流码获取工具 - 直播姬 PC 兼容版')
     parser.add_argument('-r', '--restart', action='store_true', help='强制重新开播获取推流码')
     parser.add_argument('-t', '--title', type=str, default='', help='指定直播标题')
     parser.add_argument('-l', '--list-areas', action='store_true', help='仅列出分区列表并退出')

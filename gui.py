@@ -415,8 +415,11 @@ class MainWindow(QMainWindow):
             # Fallback: query room API directly
             if live_status == 0 and room_id:
                 try:
-                    device_fp = api.get_device_fp()
-                    headers = device_fp.get_headers(with_cookie=self.cookie_str)
+                    headers = api.get_livehime_headers(
+                        self.cookie_str,
+                        api.LIVE_API_ORIGIN,
+                        api.LIVE_WEB_REFERER,
+                    )
                     resp = api.get_http_session().get(
                         f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}",
                         headers=headers).json()
@@ -498,6 +501,8 @@ class MainWindow(QMainWindow):
         self._set_buttons_enabled(True)
         if result and result.get("code") == 0:
             self.log("开播成功！")
+            if result.get("livehime_version_warning"):
+                self.log(result["livehime_version_warning"])
             if result.get("title_warning"):
                 self.log(f"标题同步可能未生效: {result['title_warning']}")
             elif result.get("title_update"):
@@ -505,6 +510,13 @@ class MainWindow(QMainWindow):
             self._refresh_status()
         else:
             self.log(f"开播失败: {result.get('message', '未知错误') if result else '无响应'}")
+            for attempt in (result or {}).get("start_live_attempts", []):
+                self.log(
+                    f"  {attempt.get('name')}: "
+                    f"{attempt.get('message', '未知错误')} ({attempt.get('code')})"
+                )
+            if result and result.get("face_auth_url"):
+                self.log(f"认证地址: {result['face_auth_url']}")
 
     # ── Stop live ──
 
