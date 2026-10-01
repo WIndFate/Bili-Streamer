@@ -292,6 +292,10 @@ class MainWindow(QMainWindow):
         self.change_area_btn.setEnabled(logged_in)
         self.refresh_btn.setEnabled(logged_in)
 
+    def _track(self, w):
+        # Keep a reference until done (prevent GC); drop finished workers
+        self._workers = [x for x in self._workers if x.isRunning()] + [w]
+
     # ── Logging ──
 
     def log(self, msg):
@@ -340,7 +344,7 @@ class MainWindow(QMainWindow):
         w = ApiWorker(api.get_area_list)
         w.finished.connect(self._on_areas_loaded)
         w.error.connect(lambda e: self.log(f"加载分区列表失败: {e}"))
-        self._workers.append(w)
+        self._track(w)
         w.start()
 
     def _on_areas_loaded(self, area_list):
@@ -398,7 +402,7 @@ class MainWindow(QMainWindow):
         w = ApiWorker(self._fetch_status)
         w.finished.connect(self._on_status_refreshed)
         w.error.connect(lambda e: self.log(f"刷新状态失败: {e}"))
-        self._workers.append(w)
+        self._track(w)
         w.start()
 
     def _fetch_status(self):
@@ -478,7 +482,7 @@ class MainWindow(QMainWindow):
             w = ApiWorker(self._stop_then_start, title)
             w.finished.connect(self._on_start_result)
             w.error.connect(lambda e: (self.log(f"操作失败: {e}"), self._set_buttons_enabled(True)))
-            self._workers.append(w)
+            self._track(w)
             w.start()
         else:
             self.log(f"正在开播「{title}」...")
@@ -486,7 +490,7 @@ class MainWindow(QMainWindow):
             w = ApiWorker(api.start_live, self.cookie_str, self.selected_area_id, title)
             w.finished.connect(self._on_start_result)
             w.error.connect(lambda e: (self.log(f"开播失败: {e}"), self._set_buttons_enabled(True)))
-            self._workers.append(w)
+            self._track(w)
             w.start()
 
     def _stop_then_start(self, title):
@@ -532,7 +536,7 @@ class MainWindow(QMainWindow):
         w = ApiWorker(api.stop_live, self.cookie_str)
         w.finished.connect(self._on_stop_result)
         w.error.connect(lambda e: (self.log(f"停播失败: {e}"), self._set_buttons_enabled(True)))
-        self._workers.append(w)
+        self._track(w)
         w.start()
 
     def _on_stop_result(self, result):
@@ -561,7 +565,7 @@ class MainWindow(QMainWindow):
         w = ApiWorker(api.update_live_area, self.cookie_str, self.selected_area_id)
         w.finished.connect(self._on_change_area_result)
         w.error.connect(lambda e: (self.log(f"更换分区失败: {e}"), self._set_buttons_enabled(True)))
-        self._workers.append(w)
+        self._track(w)
         w.start()
 
     def _on_change_area_result(self, result):

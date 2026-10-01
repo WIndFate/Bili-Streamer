@@ -462,28 +462,25 @@ def check_login_status(qrcode_key: str) -> dict:
     # 添加随机延迟使请求模式更自然
     random_delay(0.8, 2.0)
     
-    response = get_http_session().get(api, headers=headers).json()
-    data = response['data']
-    
+    resp = get_http_session().get(api, headers=headers)
+    data = resp.json()['data']
+
     cookies = {}
     code = data['code']
     if code == 0:
-        def url_to_dict(url: str):
-            """将URL参数转换成dict"""
-            url_data = url.split('?', 1)[1]
-            data_list = url_data.split('&')
-            data_dict = {}
-            for item in data_list:
-                item = item.split('=')
-                data_dict[item[0]] = item[1]
-            return data_dict
+        # Bilibili may deliver login cookies via Set-Cookie instead of the
+        # redirect URL query, so merge both sources (URL wins if present).
+        # Keep values percent-encoded, as browsers store them.
+        found = dict(resp.cookies)
+        query = (data.get('url') or '').partition('?')[2]
+        found.update(kv.split('=', 1) for kv in query.split('&') if '=' in kv)
+        required = ["DedeUserID", "DedeUserID__ckMd5", "SESSDATA", "bili_jct"]
+        missing = [k for k in required if not found.get(k)]
+        if missing:
+            raise RuntimeError(f"登录成功但缺少Cookie字段: {', '.join(missing)}")
+        for key in required:
+            cookies[key] = found[key]
 
-        data_dict = url_to_dict(data['url'])
-        cookies["DedeUserID"] = data_dict['DedeUserID']
-        cookies["DedeUserID__ckMd5"] = data_dict['DedeUserID__ckMd5']
-        cookies["SESSDATA"] = data_dict['SESSDATA']
-        cookies["bili_jct"] = data_dict['bili_jct']
-        
         # 补充cookie
         # 使用我们自己的请求头，不用B站返回的额外cookie，减少特征
         response = get_http_session().get('https://www.bilibili.com/video/', headers=headers)
