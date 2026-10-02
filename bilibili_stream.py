@@ -9,7 +9,7 @@ import time
 import random
 import hashlib
 from pathlib import Path
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode
 
 
 LIVEHIME_APP_KEY = "aae92bc66f3edfab"
@@ -357,30 +357,15 @@ class ConfigManager:
         return None
 
 
-def url_decoded(url_string: str) -> str:
-    """
-    将UTF-8解码成URL编码
-    @param url_string: 要解码的UTF-8编码字符串
-    @return: URL编码
-    """
-    utf8_encoded = quote(url_string, encoding='utf-8')
-    return utf8_encoded
-
-
 def dict2cookieformat(json_dict: dict) -> str:
     """
     将dict转换为cookie格式
     @param json_dict: 字典
     @return: cookie格式的字典
     """
-    cookie = ''
-    for key in json_dict:
-        value = json_dict[key]
-        cookie += url_decoded(str(key)) + '=' + url_decoded(str(value)) + '; '
-    cookie = cookie.strip()
-    if cookie.endswith(";"):
-        cookie = cookie[:-1]
-    return cookie
+    # Values are already cookie-safe (e.g. SESSDATA is percent-encoded);
+    # encoding again would turn %2C into %252C and invalidate the login.
+    return '; '.join(f'{key}={value}' for key, value in json_dict.items())
 
 
 def cookie2dict(cookie: str) -> dict:
