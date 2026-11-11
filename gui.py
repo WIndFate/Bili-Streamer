@@ -1,16 +1,16 @@
 import sys
 import io
+import time
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QTextEdit, QDialog, QMessageBox, QSplitter, QGroupBox, QFrame,
+    QTextEdit, QDialog, QMessageBox, QSplitter, QGroupBox,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QImage, QFont, QColor, QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtGui import QPixmap, QImage, QFont, QDesktopServices
 import qrcode
-from PIL import Image as PILImage
 
 import bilibili_stream as api
 
@@ -80,6 +80,49 @@ class ApiWorker(QThread):
 # Login dialog with QR code
 # ──────────────────────────────────────────────
 
+def qr_pixmap(data, size=250):
+    """Render a string as a QR code QPixmap."""
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=8, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    buf = io.BytesIO()
+    qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    return QPixmap.fromImage(QImage.fromData(buf.getvalue())).scaled(
+        size, size, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation)
+
+
+class FaceAuthDialog(QDialog):
+    """Show the face-auth URL as a QR code; accept() means the user wants to retry."""
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("开播人脸认证")
+        layout = QVBoxLayout(self)
+
+        tip = QLabel("请用哔哩哔哩 App 扫码完成人脸认证")
+        tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tip.setFont(QFont("", 13, QFont.Weight.Bold))
+        layout.addWidget(tip)
+
+        qr_label = QLabel()
+        qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr_label.setPixmap(qr_pixmap(url))
+        layout.addWidget(qr_label)
+
+        btns = QHBoxLayout()
+        open_btn = QPushButton("浏览器打开")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+        retry_btn = QPushButton("已完成认证，重新开播")
+        retry_btn.setDefault(True)
+        retry_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        for b in (open_btn, retry_btn, cancel_btn):
+            btns.addWidget(b)
+        layout.addLayout(btns)
+
+
 class LoginDialog(QDialog):
     """QR code scan login dialog"""
 
@@ -121,21 +164,7 @@ class LoginDialog(QDialog):
         url = qr_info["url"]
         qrcode_key = qr_info["qrcode_key"]
 
-        # Generate QR image
-        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L,
-                            box_size=8, border=2)
-        qr.add_data(url)
-        qr.make(fit=True)
-        pil_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-
-        # PIL -> QPixmap
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
-        qimage = QImage.fromData(buf.getvalue())
-        pixmap = QPixmap.fromImage(qimage).scaled(
-            250, 250, Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
-        self.qr_label.setPixmap(pixmap)
+        self.qr_label.setPixmap(qr_pixmap(url))
         self.status_label.setText("等待扫码...")
 
         # Start polling
@@ -497,7 +526,6 @@ class MainWindow(QMainWindow):
         stop_r = api.stop_live(self.cookie_str)
         if stop_r.get("code") != 0:
             return {"code": -1, "message": f"停播失败: {stop_r.get('message', '未知错误')}"}
-        import time
         time.sleep(1)
         return api.start_live(self.cookie_str, self.selected_area_id, title)
 
@@ -521,6 +549,8 @@ class MainWindow(QMainWindow):
                 )
             if result and result.get("face_auth_url"):
                 self.log(f"认证地址: {result['face_auth_url']}")
+                if FaceAuthDialog(result["face_auth_url"], self).exec():
+                    self._do_start_live()
 
     # ── Stop live ──
 

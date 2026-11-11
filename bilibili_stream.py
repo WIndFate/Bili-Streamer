@@ -1,5 +1,4 @@
 import argparse
-import io
 import json
 import os
 import qrcode
@@ -404,17 +403,7 @@ def print_qrcode(qr_str: str):
     )
     qr.add_data(qr_str)
     qr.make(fit=True)
-    
-    # 保存原始标准输出
-    old_stdout = sys.stdout
-    # 创建StringIO对象捕获输出
-    output = io.StringIO()
-    sys.stdout = output
     qr.print_ascii(invert=True)
-    sys.stdout = old_stdout
-    
-    # 打印二维码
-    print(output.getvalue())
 
 
 # 登录相关函数
@@ -1177,6 +1166,8 @@ def get_stream_key(cookie_str, force_restart=False, custom_title=""):
                     )
                 if start_result.get("face_auth_url"):
                     print(f"认证地址: {start_result['face_auth_url']}")
+                    print_qrcode(start_result["face_auth_url"])
+                    print("请用哔哩哔哩 App 扫码认证后重新运行开播")
                 return
     else:
         print("您没有直播间，请使用其他账号尝试")
